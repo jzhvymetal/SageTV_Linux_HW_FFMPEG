@@ -1,8 +1,10 @@
-I created a man-in-the-middle script that enables FFmpeg hardware decoding and encoding using Intel QSV inside the SageTV Linux Docker container. It uses a Docker-inside-Docker setup with the linuxserver/ffmpeg image, because the current SageTV Docker is based on an older Ubuntu version that does not support the required Intel drivers. By passing the video device (/dev/dri) from the host into the SageTV container, the script can launch linuxserver/ffmpeg with proper access to the Intel GPU.
+Man-in-the-middle script that intercepts the FFmpeg command SageTV sends and decides per request whether to use plain SageTV FFmpeg, a copy-only path, or a hardware transcode with an external FFmpeg. The behavior is controlled by a set of options (hardware trigger, copy trigger, external FFmpeg location, hardware init, encoder choice, and so on), and all of these settings are documented directly in the script so you can retarget it to Intel QSV, NVENC, VAAPI, or a native FFmpeg binary without changing the core logic.
 
-The script intercepts the FFmpeg command that SageTV sends and checks whether the request is for MPEG4 transcoding. If it is, the script redirects that job to the linuxserver/ffmpeg container and uses Intel QSV for hardware accelerated H.264 encoding, while still outputting a stream that SageTV can consume. The current implementation is tuned for Intel QSV, but it can be adapted to other hardware or custom FFmpeg parameters and gives you full control over how FFmpeg is launched.
+When the Android client requests hardware accelerated transcoding, the script routes that job through an external FFmpeg. By default this runs inside a persistent `ffmpeg_daemon` Docker container that has the GPU device passed in from the host, which avoids starting a new container for each stream and removes the old Docker inside Docker requirement. For live TV, the script detects SageTV’s `-activefile` flag and enables following of the growing recording file, and it emulates SageTV’s `stdinctrl` behavior by tagging each hardware session and stopping the correct FFmpeg process when STOP or QUIT is sent on stdin.
 
-If SageTV sends a request that does not require re-encoding, the script falls back to the FFmpeg binary provided by the SageTVTranscoder-FFmpeg plugin, so SageTV still receives the exact output format it expects for parsing. I looked into updating SageTVTranscoder-FFmpeg directly, but it did not appear to be in a state where I could easily make the required changes, so this man-in-the-middle approach avoids modifying that plugin while still providing modern hardware acceleration.
+If the request is copy only, the script instead builds a pipeline using SageTV’s own `ffmpeg.run` with stream copy settings and keeps `-stdinctrl` in place so startup is fast and compatibility with SageTV’s existing logic is preserved. Any other transcoding request that does not match the hardware trigger is simply passed through to `ffmpeg.run` unchanged, so the wrapper is transparent in those cases.
+
+A small helper script, `ffmpeg_init.sh`, prepares the environment at boot. It can start the optional `ffmpeg_daemon` container, copy and back up the FFmpeg binary, and create a symbolic link so SageTV always calls a stable `ffmpeg.sh` entry point while the wrapper and external FFmpeg can be updated behind the scenes. `ffmpeg_init.sh` is intended to be launched by `sagetv-user-script.sh`, which is provided by the SageTV Linux Docker image. If you only want native or copy only operation you can run `ffmpeg_init.sh` without the Docker option and skip the daemon entirely.
 
 In the future I would like to simplify this by using a static FFmpeg build inside the SageTV Docker instead of running Docker inside Docker. That would require updating the base SageTV Docker image to Ubuntu 22.x or newer so that the necessary Intel QSV drivers and libraries are available. The interception script would still be valid in that setup, only the way FFmpeg is launched would change.
 
@@ -51,31 +53,20 @@ cd /opt/sagetv/server
 mv ffmpeg ffmpeg.run
 ```
 
-5. In the `/opt/sagetv/server` directory, edit `sagetv-user-script.sh` and add the following lines:
+5. Either copy to `sagetv-user-script.sh` to  `/opt/sagetv/server` directory or edit `sagetv-user-script.sh` and add the following lines:
 
 ```bash
-# Copy script in case ffmpeg is upgraded when Docker starts
-cp -f /opt/sagetv/server/ffmpeg.sh /opt/sagetv/server/ffmpeg
-
-# Start Docker daemon in background
-sudo dockerd --host=unix:///var/run/docker.sock --storage-driver=overlay2 &
-
-# Wait until the daemon is ready
-until sudo docker info >/dev/null 2>&1; do
-  sleep 1
-done
+chmod 777 /opt/sagetv/server/ffmpeg_init.sh
+#Remove docker if ffmpeg is native installed as it will start docker and ffmpeg daemon
+sudo bash /opt/sagetv/server/ffmpeg_init.sh docker
 ```
 
-6. Copy `ffmpeg.sh` into the `/opt/sagetv/server` directory:
-
-```bash
-cp ffmpeg.sh /opt/sagetv/server/
-```
+6. Copy `ffmpeg_init.sh` and  `ffmpeg.sh` into the `/opt/sagetv/server` directory:
 
 7. Restart the SageTV Docker container.
 
-8. Test the ffmpeg Docker image inside the SageTV Docker container:
+8. Test the ffmpeg demaon Docker  image inside the SageTV Docker container:
 
 ```bash
-sudo docker run --rm linuxserver/ffmpeg
+sudo docker exec ffmpeg_daemon ffmpeg
 ```
