@@ -1,0 +1,42 @@
+11/21/2025
+  1. The script is no longer QSV only: using `FFMPEG_TRANSCODE_BIN`, `HW_INIT_ARGS`, `VIDEO_CODEC`, `VIDEO_PRESET_OPT`, `VIDEO_PRESET_VALUE`, `VIDEO_EXTRA_ARGS`, `DEINT_FILTER`, and `DEINT_SCALE_FILTER_TEMPLATE`, you can adapt it to any GPU hardware acceleration (for example QSV, NVENC, VAAPI) just by changing parameters at the top.
+
+2. `DEINT_FILTER` and `DEINT_SCALE_FILTER_TEMPLATE` control deinterlace and scale based on Sage’s `-s WxH` size, and encoder settings are generalized by replacing `QSV_PRESET` with `VIDEO_CODEC`, `VIDEO_PRESET_OPT`, `VIDEO_PRESET_VALUE`, and `VIDEO_EXTRA_ARGS`.
+
+3. VBR style control is added using `V_MAXRATE_MULTI` and `V_BUFSIZE_MULTI`, which derive `-maxrate` and `-bufsize` from Sage’s `-b` bitrate.
+
+4. Hardware trigger mode: `HW_TRIGGER_VCODEC` decides when hardware video transcode is used. If Sage’s `-vcodec` matches this value, video is sent through the hardware encoder, while audio can either be reencoded (if `AUDIO_REENCODE="yes"`) or copied (if `AUDIO_REENCODE="no"`).
+
+   * SageTV Android App settings for `HW_TRIGGER_VCODEC="mpeg4"` (Hardware Acceleration):
+
+     * Streaming Mode: **Fixed**
+     * Fixed Transcoding Settings:
+
+       * Transcoding Preference: **Always**
+       * Container Format: **Matroska (MKV)**
+
+5. Copy only trigger mode: `COPY_ONLY_F_TRIGGER` decides when a triggered job should be stream copy only instead of hardware transcode. If Sage’s `-f` equals this value, the script builds a pipeline using SageTV’s own `ffmpeg.run` with `-c:v copy -c:a copy`, keeps `-stdinctrl`, and does not use Docker or hardware encode. Using the SageTV bundled ffmpeg gives quicker startup and better compatibility with Sage’s existing playback and control logic.
+
+   * SageTV Android App settings for `COPY_ONLY_F_TRIGGER="dvd"` (Copy Only):
+
+     * Streaming Mode: **Fixed**
+     * Fixed Transcoding Settings:
+
+       * Transcoding Preference: **Always**
+       * Container Format: **DVD (MPEG-PS)**
+
+6. Input handling is expanded: the wrapper recognizes `-activefile` and adds `-follow 1` in the hardware path, and it tracks and reuses `-packetsize` and `-aspect`. This fixes Live TV, where the recording file grows while being read, by ensuring hardware ffmpeg tails the active file correctly.
+
+7. Audio and mapping are refined: `AUDIO_REENCODE` keeps its original behavior, and `AUDIO_TRACK_MODE` (`default` vs `all`) controls whether the script adds explicit `-map` for video and audio streams.
+
+8. Latency is improved by clamping GOP to a configurable maximum (`GOP_CLAMP_MAX`, default 60) if Sage requested a larger `-g` value.
+
+9. Stdinctrl emulation is improved: the script adds `SESSION_ID` and embeds `session_tag` metadata on ffmpeg, and `stop_ffmpeg()` uses `pkill` inside Docker to match that tag, falling back to the input filename if needed.
+
+10. Logging is overhauled with an `ENABLE_LOGGING` master switch and a `log()` helper, richer prefixes (`[SAGETV/ORIG]`, `[SAGETV/COPY]`, `[FFMPEG CMD]`, `[INFO]`, `[STDINCTRL RAW]`, `[STDINCTRL HEX]`), and an optional hex dump of stdin control lines via `DEBUG_STDINCTRL_HEX`.
+
+11. External ffmpeg location is configurable via `FFMPEG_TRANSCODE_BIN`, which can point to either a native or local ffmpeg binary or a `docker exec` command. When using the Docker hardware path, a persistent `ffmpeg_daemon` container is used instead of starting a new container per stream, improving startup time. That daemon container is normally loaded at boot by `ffmpeg_init.sh`. The daemon is not required if you only use native mode or copy only mode. To prevent the daemon from launching, run `ffmpeg_init.sh` without the `docker` argument.
+
+12. `ffmpeg_init.sh` also copies and backs up the ffmpeg binary and now creates a symbolic link to `ffmpeg.sh`, so SageTV can call a stable path while the real wrapper and binary can be updated or replaced safely behind that link.
+
+13. Demux and container behavior are tunable via `DEMUX_PROBESIZE`, `DEMUX_ANALYZEDURATION`, `OUTPUT_FORMAT`, and stricter `-fflags` and `-max_delay` settings, improving startup behavior and stream stability. Signal handling is more robust, with traps that call `stop_ffmpeg()` and log exit status, and `ENABLE_LOGGING` allows file logging to be turned off completely while still letting ffmpeg stderr go to the console.
